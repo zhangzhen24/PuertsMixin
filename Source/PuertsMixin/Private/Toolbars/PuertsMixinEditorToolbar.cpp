@@ -115,13 +115,6 @@ void FPuertsMixinEditorToolbar::Mixin_Executed()
 	// 如果文件不存在，则生成 TS 模板
 	if (!PlatformFile.FileExists(*AbsFilePath))
 	{
-		// 1. 执行 Puerts.Gen 命令，确保 TS 类型定义是最新的
-		// 这样生成的 TS 文件中引用的 Blueprint 类型才有效
-		if (GEditor)
-		{
-			GEditor->Exec(nullptr, TEXT("Puerts.Gen"), *GLog);
-		}
-
 		// 根据 Blueprint 的层级深度计算 Mixin 的相对导入路径
 		// 例如：NPC/Services/BTS_Shoot -> ../../../Mixin
 		TArray<FString> PathParts;
@@ -354,6 +347,13 @@ void FPuertsMixinEditorToolbar::Mixin_Executed()
 			nullptr
 		);
 
+		// 1. 执行 Puerts.Gen 命令，确保 TS 类型定义是最新的
+		// 这样生成的 TS 文件中引用的 Blueprint 类型才有效
+		if (GEditor)
+		{
+			GEditor->Exec(nullptr, TEXT("Puerts.Gen"), *GLog);
+		}
+		
 		if (!Handle.IsValid())
 		{
 			FMessageDialog::Open(
