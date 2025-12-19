@@ -45,7 +45,9 @@ public class PuertsMixin : ModuleRules
 				"SlateCore",
 				"SourceCodeAccess",
 				"Kismet",
-				// ... add private dependencies that you statically link with here ...	
+				"DesktopPlatform",
+				"ContentBrowser",
+				// ... add private dependencies that you statically link with here ...
 			}
 			);
 		

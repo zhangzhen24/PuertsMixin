@@ -5,6 +5,7 @@ UPuertsMixinSettings::UPuertsMixinSettings()
 	: EditorType(EPuertsMixinEditorType::VSCode)
 	  , CustomEditorExecutable(TEXT("code.cmd"))
 	  , MainEntryFileName(TEXT("Main.ts"))
+	  , MixinRegistryFileName(TEXT("MixinRegistry.ts"))
 {}
 
 FString UPuertsMixinSettings::GetEditorCommand() const

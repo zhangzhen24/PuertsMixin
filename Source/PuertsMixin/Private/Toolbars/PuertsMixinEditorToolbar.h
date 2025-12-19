@@ -5,6 +5,8 @@
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "Framework/Commands/UICommandList.h"
 
+class UBlueprint;
+
 class FPuertsMixinEditorToolbar
 {
 public:
@@ -24,6 +26,15 @@ public:
 
 	/** Mixin 按钮执行回调：生成/打开 TS 混入文件 */
 	void Mixin_Executed();
+
+	/** 静态方法：为指定蓝图创建 Mixin（供右键菜单等入口调用） */
+	static void CreateMixinForBlueprint(UBlueprint* Blueprint);
+
+	/** 静态方法：批量创建 Mixin 到指定目录 */
+	static void CreateMixinsForBlueprints(const TArray<UBlueprint*>& Blueprints, const FString& TargetDirectory);
+
+	/** 记录上次导出的目录（相对于 TypeScript/） */
+	static FString LastExportDirectory;
 
 protected:
 

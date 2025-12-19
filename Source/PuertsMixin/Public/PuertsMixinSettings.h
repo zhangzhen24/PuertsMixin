@@ -57,6 +57,17 @@ public:
 	FString MainEntryFileName;
 
 	/**
+	 * Mixin 注册文件名称
+	 * 导出 Mixin 时自动将 import 语句添加到此文件
+	 * 用户需要在主入口文件中 import 此文件
+	 * 默认值：MixinRegistry.ts
+	 */
+	UPROPERTY(
+		EditAnywhere, config, Category = "Code Generation", meta = (DisplayName = "Mixin注册文件名")
+	)
+	FString MixinRegistryFileName;
+
+	/**
 	 * 获取当前配置的编辑器启动命令
 	 * @return 可执行文件名或路径
 	 */

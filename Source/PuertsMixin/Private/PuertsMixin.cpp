@@ -9,11 +9,16 @@
 #include "PuertsMixinStyle.h"
 #include "PuertsMixinCommands.h"
 #include "Toolbars/BlueprintToolbar.h"
+#include "Toolbars/PuertsMixinEditorToolbar.h"
 #include "Misc/CoreDelegates.h"
 #include "Editor.h"
 #include "ISettingsModule.h"
 #include "ISettingsSection.h"
 #include "PuertsMixinSettings.h"
+#include "ContentBrowserModule.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "Engine/Blueprint.h"
+#include "Widgets/SMixinPathDialog.h"
 
 #define LOCTEXT_NAMESPACE "FPuertsMixinModule"
 
@@ -34,11 +39,34 @@ void FPuertsMixinModule::StartupModule()
 
 	// 创建工具栏实例，但暂不初始化
 	BlueprintToolbar = MakeShareable(new FBlueprintToolbar);
+
+	// 注册 ContentBrowser 右键菜单扩展
+	FContentBrowserModule& ContentBrowserModule =
+		FModuleManager::LoadModuleChecked<FContentBrowserModule>(TEXT("ContentBrowser"));
+	TArray<FContentBrowserMenuExtender_SelectedAssets>& ExtenderDelegates =
+		ContentBrowserModule.GetAllAssetViewContextMenuExtenders();
+	ExtenderDelegates.Add(
+		FContentBrowserMenuExtender_SelectedAssets::CreateRaw(
+			this, &FPuertsMixinModule::OnExtendContentBrowserAssetMenu
+		)
+	);
+	ContentBrowserExtenderHandle = ExtenderDelegates.Last().GetHandle();
 }
 
 void FPuertsMixinModule::ShutdownModule()
 {
 	// 模块关闭：反注册菜单与样式、释放资源
+
+	// 取消注册 ContentBrowser 扩展
+	if (FContentBrowserModule* ContentBrowserModule =
+		FModuleManager::GetModulePtr<FContentBrowserModule>(TEXT("ContentBrowser")))
+	{
+		TArray<FContentBrowserMenuExtender_SelectedAssets>& ExtenderDelegates =
+			ContentBrowserModule->GetAllAssetViewContextMenuExtenders();
+		ExtenderDelegates.RemoveAll([this](const FContentBrowserMenuExtender_SelectedAssets& Delegate) {
+			return Delegate.GetHandle() == ContentBrowserExtenderHandle;
+		});
+	}
 
 	UnregisterSettings();
 
@@ -81,6 +109,124 @@ void FPuertsMixinModule::OnPostEngineInit()
 	if (BlueprintToolbar.IsValid())
 	{
 		BlueprintToolbar->Initialize();
+	}
+}
+
+TSharedRef<FExtender> FPuertsMixinModule::OnExtendContentBrowserAssetMenu(const TArray<FAssetData>& SelectedAssets)
+{
+	TSharedRef<FExtender> MenuExtender = MakeShareable(new FExtender());
+
+	// 检查选中的资产中是否有蓝图
+	bool bHasBlueprints = false;
+	for (const FAssetData& Asset : SelectedAssets)
+	{
+		if (Asset.AssetClassPath == UBlueprint::StaticClass()->GetClassPathName())
+		{
+			bHasBlueprints = true;
+			break;
+		}
+	}
+
+	if (bHasBlueprints)
+	{
+		MenuExtender->AddMenuExtension(
+			"CommonAssetActions",
+			EExtensionHook::After,
+			nullptr,
+			FMenuExtensionDelegate::CreateRaw(
+				this,
+				&FPuertsMixinModule::AddMixinMenuEntry,
+				SelectedAssets
+			)
+		);
+	}
+
+	return MenuExtender;
+}
+
+void FPuertsMixinModule::AddMixinMenuEntry(FMenuBuilder& MenuBuilder, TArray<FAssetData> SelectedAssets)
+{
+	// 过滤出蓝图资产
+	TArray<FAssetData> BlueprintAssets;
+	for (const FAssetData& Asset : SelectedAssets)
+	{
+		if (Asset.AssetClassPath == UBlueprint::StaticClass()->GetClassPathName())
+		{
+			BlueprintAssets.Add(Asset);
+		}
+	}
+
+	if (BlueprintAssets.Num() == 0)
+	{
+		return;
+	}
+
+	// 根据选中数量显示不同的菜单文本
+	FText MenuLabel = BlueprintAssets.Num() == 1
+		? LOCTEXT("CreateMixin", "Create Mixin")
+		: FText::Format(LOCTEXT("CreateMixinMultiple", "Create Mixin ({0} Blueprints)"), FText::AsNumber(BlueprintAssets.Num()));
+
+	FText MenuTooltip = BlueprintAssets.Num() == 1
+		? LOCTEXT("CreateMixin_Tooltip", "Generate TypeScript Mixin file for this Blueprint")
+		: LOCTEXT("CreateMixinMultiple_Tooltip", "Generate TypeScript Mixin files for selected Blueprints");
+
+	MenuBuilder.AddMenuEntry(
+		MenuLabel,
+		MenuTooltip,
+		FSlateIcon(FPuertsMixinStyle::GetStyleSetName(), "PuertsMixin.PluginAction"),
+		FUIAction(FExecuteAction::CreateRaw(this, &FPuertsMixinModule::OnCreateMixinFromAssets, BlueprintAssets))
+	);
+}
+
+void FPuertsMixinModule::OnCreateMixinFromAsset(FAssetData AssetData)
+{
+	// 加载蓝图资产
+	UBlueprint* Blueprint = Cast<UBlueprint>(AssetData.GetAsset());
+	if (!Blueprint)
+	{
+		return;
+	}
+
+	// 调用核心 Mixin 创建逻辑
+	FPuertsMixinEditorToolbar::CreateMixinForBlueprint(Blueprint);
+}
+
+void FPuertsMixinModule::OnCreateMixinFromAssets(TArray<FAssetData> SelectedAssets)
+{
+	if (SelectedAssets.Num() == 0)
+	{
+		return;
+	}
+
+	// 单选时使用原有逻辑（显示完整路径对话框）
+	if (SelectedAssets.Num() == 1)
+	{
+		OnCreateMixinFromAsset(SelectedAssets[0]);
+		return;
+	}
+
+	// 多选时：先选择目录，再批量创建
+	FString TargetDirectory;
+	if (!SMixinPathDialog::ShowDirectoryDialog(TargetDirectory))
+	{
+		// 用户取消或选择了无效目录
+		return;
+	}
+
+	// 加载所有蓝图
+	TArray<UBlueprint*> Blueprints;
+	for (const FAssetData& AssetData : SelectedAssets)
+	{
+		UBlueprint* Blueprint = Cast<UBlueprint>(AssetData.GetAsset());
+		if (Blueprint)
+		{
+			Blueprints.Add(Blueprint);
+		}
+	}
+
+	if (Blueprints.Num() > 0)
+	{
+		FPuertsMixinEditorToolbar::CreateMixinsForBlueprints(Blueprints, TargetDirectory);
 	}
 }
 

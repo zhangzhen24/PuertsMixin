@@ -11,8 +11,12 @@
 #include "Editor.h"
 #include "PuertsMixinSettings.h"
 #include "Interfaces/IPluginManager.h"
+#include "Widgets/SMixinPathDialog.h"
 
 #define LOCTEXT_NAMESPACE "FPuertsMixinEditorToolbar"
+
+// 静态成员初始化：记录上次导出目录
+FString FPuertsMixinEditorToolbar::LastExportDirectory = TEXT("");
 
 FPuertsMixinEditorToolbar::FPuertsMixinEditorToolbar()
 	: CommandList(new FUICommandList),
@@ -76,33 +80,62 @@ void FPuertsMixinEditorToolbar::Mixin_Executed()
 		return;
 	}
 
-	// Blueprint 名称（用于 TS class 名）
+	// Blueprint 名称
 	FString BPName = TargetBP->GetName();
 
 	// Blueprint 所在 Package 路径，例如：/Game/NPC/Services/BTS_Shoot
 	FString PackageName = TargetBP->GetOutermost()->GetName();
 
 	// 去掉 /Game/ 前缀，得到相对于 Content 的路径
-	FString RelativePath = PackageName;
-	if (RelativePath.StartsWith(TEXT("/Game/")))
+	FString ContentRelativePath = PackageName;
+	if (ContentRelativePath.StartsWith(TEXT("/Game/")))
 	{
-		RelativePath.RightChopInline(6); // 移除 "/Game/"
+		ContentRelativePath.RightChopInline(6); // 移除 "/Game/"
 	}
 
-	// 构造绝对路径：
-	// <Project>/TypeScript/Blueprints/NPC/Services/BTS_Shoot.ts
-	FString AbsFilePath = FPaths::Combine(
-		FPaths::ProjectDir(),
-		TEXT("TypeScript/Blueprints"),
-		RelativePath + TEXT(".ts")
-	);
+	// 默认路径：使用上次导出的目录 + 蓝图名称
+	FString DefaultRelativePath = LastExportDirectory + BPName + TEXT(".ts");
 
-	// 标准化路径分隔符
+	// 用户选择的相对路径和类名
+	FString UserSelectedPath;
+	FString MixinName;
+
+	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+
+	// 显示路径选择对话框
+	if (!SMixinPathDialog::ShowDialog(DefaultRelativePath, BPName, UserSelectedPath, MixinName))
+	{
+		// 用户取消
+		return;
+	}
+
+	// 确保路径以 .ts 结尾
+	if (!UserSelectedPath.EndsWith(TEXT(".ts")))
+	{
+		UserSelectedPath = FPaths::Combine(UserSelectedPath, MixinName + TEXT(".ts"));
+	}
+
+	// 记录本次导出的目录（供下次使用）
+	FString ExportDir = FPaths::GetPath(UserSelectedPath);
+	if (!ExportDir.IsEmpty() && !ExportDir.EndsWith(TEXT("/")))
+	{
+		ExportDir += TEXT("/");
+	}
+	LastExportDirectory = ExportDir;
+
+	// 构造绝对路径
+	FString AbsFilePath = FPaths::Combine(FPaths::ProjectDir(), TEXT("TypeScript"), UserSelectedPath);
 	FPaths::MakeStandardFilename(AbsFilePath);
 
+	// 计算相对路径（用于 import 路径计算）
+	FString RelativePath = UserSelectedPath;
+	if (RelativePath.EndsWith(TEXT(".ts")))
+	{
+		RelativePath.LeftChopInline(3); // 移除 ".ts"
+	}
+
 	// 确保目录存在
-	FString FileDir             = FPaths::GetPath(AbsFilePath);
-	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+	FString FileDir = FPaths::GetPath(AbsFilePath);
 
 	if (!PlatformFile.DirectoryExists(*FileDir))
 	{
@@ -115,33 +148,48 @@ void FPuertsMixinEditorToolbar::Mixin_Executed()
 	// 如果文件不存在，则生成 TS 模板
 	if (!PlatformFile.FileExists(*AbsFilePath))
 	{
-		// 根据 Blueprint 的层级深度计算 Mixin 的相对导入路径
-		// 例如：NPC/Services/BTS_Shoot -> ../../../Mixin
+		// 根据用户选择路径的层级深度计算 Mixin 的相对导入路径
+		// 例如：Actors/BP_Test -> ../mixin（1层目录）
+		// 例如：Blueprints/Project/Blueprint/BP_Test -> ../../../mixin（3层目录）
 		TArray<FString> PathParts;
 		RelativePath.ParseIntoArray(PathParts, TEXT("/"), true);
 
-		int32 Depth = PathParts.Num();
+		// 目录深度 = 路径部分数量 - 1（最后一个是文件名，不计入目录深度）
+		int32 DirectoryDepth = PathParts.Num() - 1;
 
-		FString MixinImportPath = TEXT("..");
-		for (int32 i = 1; i < Depth; ++i)
+		FString MixinImportPath;
+		if (DirectoryDepth <= 0)
 		{
-			MixinImportPath += TEXT("/..");
+			// 文件在 TypeScript 根目录
+			MixinImportPath = TEXT("./mixin");
 		}
-		MixinImportPath += TEXT("/Mixin");
+		else
+		{
+			MixinImportPath = TEXT("..");
+			for (int32 i = 1; i < DirectoryDepth; ++i)
+			{
+				MixinImportPath += TEXT("/..");
+			}
+			MixinImportPath += TEXT("/mixin");
+		}
 
 		// Blueprint 生成类路径（Puerts 使用）
 		FString ClassPath = TargetBP->GetPathName() + TEXT("_C");
 
 		// 生成 TS 类型路径（UE.Game.[目录].[蓝图名].[蓝图名]_C）
+		// 注意：这里使用蓝图的 Content 路径，而不是用户选择的 TypeScript 路径
+		TArray<FString> ContentPathParts;
+		ContentRelativePath.ParseIntoArray(ContentPathParts, TEXT("/"), true);
+
 		FString TsTypePath = TEXT("UE.Game");
-		if (PathParts.Num() > 0)
+		if (ContentPathParts.Num() > 0)
 		{
-			for (int32 i = 0; i < PathParts.Num() - 1; ++i)
+			for (int32 i = 0; i < ContentPathParts.Num() - 1; ++i)
 			{
 				TsTypePath += TEXT(".");
-				TsTypePath += PathParts[i];
+				TsTypePath += ContentPathParts[i];
 			}
-			const FString& BPShortName = PathParts.Last();
+			const FString& BPShortName = ContentPathParts.Last();
 			TsTypePath += TEXT(".");
 			TsTypePath += BPShortName;
 			TsTypePath += TEXT(".");
@@ -196,6 +244,7 @@ void FPuertsMixinEditorToolbar::Mixin_Executed()
 				{
 					// 替换占位符
 					Content = Content.Replace(TEXT("{BPName}"), *BPName)
+									 .Replace(TEXT("{MixinName}"), *MixinName)
 									 .Replace(TEXT("{PackageName}"), *PackageName)
 									 .Replace(TEXT("{MixinImportPath}"), *MixinImportPath)
 									 .Replace(TEXT("{AssetPath}"), *ClassPath)
@@ -217,6 +266,7 @@ void FPuertsMixinEditorToolbar::Mixin_Executed()
 				if (FFileHelper::LoadFileToString(Content, *DefaultTemplatePath))
 				{
 					Content = Content.Replace(TEXT("{BPName}"), *BPName)
+									 .Replace(TEXT("{MixinName}"), *MixinName)
 									 .Replace(TEXT("{PackageName}"), *PackageName)
 									 .Replace(TEXT("{MixinImportPath}"), *MixinImportPath)
 									 .Replace(TEXT("{AssetPath}"), *ClassPath)
@@ -240,7 +290,7 @@ void FPuertsMixinEditorToolbar::Mixin_Executed()
 				),
 				*MixinImportPath,
 				*ClassPath,
-				*BPName,
+				*MixinName,
 				*TsTypePath
 			);
 		}
@@ -249,43 +299,89 @@ void FPuertsMixinEditorToolbar::Mixin_Executed()
 		FFileHelper::SaveStringToFile(Content, *AbsFilePath);
 
 		// -------------------------------------------------------------------------
-		// 自动注册 Mixin 类到入口文件
+		// 自动注册 Mixin 类到注册文件
 		// -------------------------------------------------------------------------
-		FString MainEntryName = Settings->MainEntryFileName;
-		if (MainEntryName.IsEmpty())
+		FString RegistryFileName = Settings->MixinRegistryFileName;
+		if (RegistryFileName.IsEmpty())
 		{
-			MainEntryName = TEXT("Main.ts");
+			RegistryFileName = TEXT("MixinRegistry.ts");
 		}
 
-		// Main 文件绝对路径：<Project>/TypeScript/Main.ts
-		FString MainFilePath = FPaths::Combine(FPaths::ProjectDir(), TEXT("TypeScript"), MainEntryName);
-		FPaths::MakeStandardFilename(MainFilePath);
+		// 注册文件绝对路径：<Project>/TypeScript/MixinRegistry.ts
+		FString RegistryFilePath = FPaths::Combine(FPaths::ProjectDir(), TEXT("TypeScript"), RegistryFileName);
+		FPaths::MakeStandardFilename(RegistryFilePath);
 
-		if (PlatformFile.FileExists(*MainFilePath))
+		FString RegistryContent;
+
+		// 如果文件不存在，创建并添加注释头
+		if (!PlatformFile.FileExists(*RegistryFilePath))
 		{
-			FString MainContent;
-			if (FFileHelper::LoadFileToString(MainContent, *MainFilePath))
+			RegistryContent = TEXT("// Mixin Registry - 自动生成，请勿手动编辑\r\n// Auto-generated Mixin imports\r\n\r\n");
+		}
+		else
+		{
+			FFileHelper::LoadFileToString(RegistryContent, *RegistryFilePath);
+		}
+
+		// 计算相对导入路径
+		// Generated TS: TypeScript/Actors/BP_Test.ts
+		// Registry TS: TypeScript/MixinRegistry.ts
+		// Relative: ./Actors/BP_Test
+		FString ImportPath = TEXT("./") + RelativePath;
+		// 将 Windows 路径分隔符替换为 /
+		ImportPath.ReplaceInline(TEXT("\\"), TEXT("/"));
+
+		// 检查是否已经包含该导入
+		if (!RegistryContent.Contains(ImportPath))
+		{
+			FString ImportStmt = FString::Printf(TEXT("import '%s';"), *ImportPath);
+
+			// 解析文件：分离注释头和 import 语句
+			TArray<FString> Lines;
+			RegistryContent.ParseIntoArrayLines(Lines);
+
+			TArray<FString> HeaderLines;
+			TArray<FString> ImportLines;
+
+			for (const FString& Line : Lines)
 			{
-				// 计算相对导入路径
-				// Generated TS: TypeScript/Blueprints/NPC/Services/BTS_Shoot.ts
-				// Main TS: TypeScript/Main.ts
-				// Relative: ./Blueprints/NPC/Services/BTS_Shoot
-
-				FString ImportPath = TEXT("./Blueprints/") + RelativePath;
-				// 将 Windows 路径分隔符替换为 /
-				ImportPath.ReplaceInline(TEXT("\\"), TEXT("/"));
-
-				// 检查是否已经包含该导入
-				if (!MainContent.Contains(ImportPath))
+				FString TrimmedLine = Line.TrimStartAndEnd();
+				if (TrimmedLine.StartsWith(TEXT("import ")))
 				{
-					FString ImportStmt = FString::Printf(TEXT("import '%s';\r\n"), *ImportPath);
-
-					// 追加到文件末尾（也可以考虑插入到开头，但追加更安全不易破坏结构）
-					MainContent += ImportStmt;
-
-					FFileHelper::SaveStringToFile(MainContent, *MainFilePath);
+					ImportLines.Add(TrimmedLine);
+				}
+				else if (TrimmedLine.StartsWith(TEXT("//")) || TrimmedLine.IsEmpty())
+				{
+					// 只有在还没有遇到 import 语句时才添加到 header
+					if (ImportLines.Num() == 0)
+					{
+						HeaderLines.Add(Line);
+					}
 				}
 			}
+
+			// 添加新的 import
+			ImportLines.Add(ImportStmt);
+
+			// 排序 import 语句
+			ImportLines.Sort();
+
+			// 重建文件内容
+			FString NewContent;
+			for (const FString& HeaderLine : HeaderLines)
+			{
+				NewContent += HeaderLine + TEXT("\r\n");
+			}
+			if (HeaderLines.Num() > 0 && !HeaderLines.Last().IsEmpty())
+			{
+				NewContent += TEXT("\r\n");
+			}
+			for (const FString& ImportLine : ImportLines)
+			{
+				NewContent += ImportLine + TEXT("\r\n");
+			}
+
+			FFileHelper::SaveStringToFile(NewContent, *RegistryFilePath);
 		}
 	}
 
@@ -362,6 +458,641 @@ void FPuertsMixinEditorToolbar::Mixin_Executed()
 				)
 			);
 		}
+	}
+}
+
+void FPuertsMixinEditorToolbar::CreateMixinForBlueprint(UBlueprint* TargetBP)
+{
+	if (!TargetBP)
+	{
+		FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(TEXT("No Blueprint provided.")));
+		return;
+	}
+
+	// Blueprint 名称
+	FString BPName = TargetBP->GetName();
+
+	// Blueprint 所在 Package 路径，例如：/Game/NPC/Services/BTS_Shoot
+	FString PackageName = TargetBP->GetOutermost()->GetName();
+
+	// 去掉 /Game/ 前缀，得到相对于 Content 的路径
+	FString ContentRelativePath = PackageName;
+	if (ContentRelativePath.StartsWith(TEXT("/Game/")))
+	{
+		ContentRelativePath.RightChopInline(6); // 移除 "/Game/"
+	}
+
+	// 默认路径：使用上次导出的目录 + 蓝图名称
+	FString DefaultRelativePath = LastExportDirectory + BPName + TEXT(".ts");
+
+	// 用户选择的相对路径和类名
+	FString UserSelectedPath;
+	FString MixinName;
+
+	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+
+	// 显示路径选择对话框
+	if (!SMixinPathDialog::ShowDialog(DefaultRelativePath, BPName, UserSelectedPath, MixinName))
+	{
+		// 用户取消
+		return;
+	}
+
+	// 确保路径以 .ts 结尾
+	if (!UserSelectedPath.EndsWith(TEXT(".ts")))
+	{
+		UserSelectedPath = FPaths::Combine(UserSelectedPath, MixinName + TEXT(".ts"));
+	}
+
+	// 记录本次导出的目录（供下次使用）
+	FString ExportDir = FPaths::GetPath(UserSelectedPath);
+	if (!ExportDir.IsEmpty() && !ExportDir.EndsWith(TEXT("/")))
+	{
+		ExportDir += TEXT("/");
+	}
+	LastExportDirectory = ExportDir;
+
+	// 构造绝对路径
+	FString AbsFilePath = FPaths::Combine(FPaths::ProjectDir(), TEXT("TypeScript"), UserSelectedPath);
+	FPaths::MakeStandardFilename(AbsFilePath);
+
+	// 计算相对路径（用于 import 路径计算）
+	FString RelativePath = UserSelectedPath;
+	if (RelativePath.EndsWith(TEXT(".ts")))
+	{
+		RelativePath.LeftChopInline(3); // 移除 ".ts"
+	}
+
+	// 确保目录存在
+	FString FileDir = FPaths::GetPath(AbsFilePath);
+
+	if (!PlatformFile.DirectoryExists(*FileDir))
+	{
+		PlatformFile.CreateDirectoryTree(*FileDir);
+	}
+
+	// 获取设置
+	const UPuertsMixinSettings* Settings = GetDefault<UPuertsMixinSettings>();
+
+	// 如果文件不存在，则生成 TS 模板
+	if (!PlatformFile.FileExists(*AbsFilePath))
+	{
+		// 根据用户选择路径的层级深度计算 Mixin 的相对导入路径
+		TArray<FString> PathParts;
+		RelativePath.ParseIntoArray(PathParts, TEXT("/"), true);
+
+		int32 DirectoryDepth = PathParts.Num() - 1;
+
+		FString MixinImportPath;
+		if (DirectoryDepth <= 0)
+		{
+			MixinImportPath = TEXT("./mixin");
+		}
+		else
+		{
+			MixinImportPath = TEXT("..");
+			for (int32 i = 1; i < DirectoryDepth; ++i)
+			{
+				MixinImportPath += TEXT("/..");
+			}
+			MixinImportPath += TEXT("/mixin");
+		}
+
+		// Blueprint 生成类路径（Puerts 使用）
+		FString ClassPath = TargetBP->GetPathName() + TEXT("_C");
+
+		// 生成 TS 类型路径
+		TArray<FString> ContentPathParts;
+		ContentRelativePath.ParseIntoArray(ContentPathParts, TEXT("/"), true);
+
+		FString TsTypePath = TEXT("UE.Game");
+		if (ContentPathParts.Num() > 0)
+		{
+			for (int32 i = 0; i < ContentPathParts.Num() - 1; ++i)
+			{
+				TsTypePath += TEXT(".");
+				TsTypePath += ContentPathParts[i];
+			}
+			const FString& BPShortName = ContentPathParts.Last();
+			TsTypePath += TEXT(".");
+			TsTypePath += BPShortName;
+			TsTypePath += TEXT(".");
+			TsTypePath += BPShortName;
+			TsTypePath += TEXT("_C");
+		}
+		else
+		{
+			TsTypePath += TEXT(".");
+			TsTypePath += BPName;
+			TsTypePath += TEXT(".");
+			TsTypePath += BPName;
+			TsTypePath += TEXT("_C");
+		}
+
+		// 查找并应用模板
+		static FString BaseDir = IPluginManager::Get().FindPlugin(TEXT("PuertsMixin"))->GetBaseDir();
+
+		UClass* Class = TargetBP->GeneratedClass;
+		FString Content;
+		bool bTemplateFound = false;
+
+		for (auto TemplateClass = Class; TemplateClass; TemplateClass = TemplateClass->GetSuperClass())
+		{
+			FString TemplateClassName = TemplateClass->GetName();
+			if (TemplateClassName.EndsWith(TEXT("_C")))
+			{
+				TemplateClassName.LeftChopInline(2);
+			}
+
+			FString RelativeFilePath = FPaths::Combine(
+				TEXT("Config/TSTemplates"), TemplateClassName + TEXT(".ts")
+			);
+
+			FString FullFilePath = FPaths::Combine(FPaths::ProjectConfigDir(), RelativeFilePath);
+			if (!FPaths::FileExists(FullFilePath))
+			{
+				FullFilePath = FPaths::Combine(BaseDir, RelativeFilePath);
+			}
+
+			if (FPaths::FileExists(FullFilePath))
+			{
+				if (FFileHelper::LoadFileToString(Content, *FullFilePath))
+				{
+					Content = Content.Replace(TEXT("{BPName}"), *BPName)
+									 .Replace(TEXT("{MixinName}"), *MixinName)
+									 .Replace(TEXT("{PackageName}"), *PackageName)
+									 .Replace(TEXT("{MixinImportPath}"), *MixinImportPath)
+									 .Replace(TEXT("{AssetPath}"), *ClassPath)
+									 .Replace(TEXT("{TsTypePath}"), *TsTypePath);
+
+					bTemplateFound = true;
+					break;
+				}
+			}
+		}
+
+		if (!bTemplateFound)
+		{
+			FString DefaultTemplatePath = FPaths::Combine(BaseDir, TEXT("Config/TSTemplates/Object.ts"));
+			if (FPaths::FileExists(DefaultTemplatePath))
+			{
+				if (FFileHelper::LoadFileToString(Content, *DefaultTemplatePath))
+				{
+					Content = Content.Replace(TEXT("{BPName}"), *BPName)
+									 .Replace(TEXT("{MixinName}"), *MixinName)
+									 .Replace(TEXT("{PackageName}"), *PackageName)
+									 .Replace(TEXT("{MixinImportPath}"), *MixinImportPath)
+									 .Replace(TEXT("{AssetPath}"), *ClassPath)
+									 .Replace(TEXT("{TsTypePath}"), *TsTypePath);
+					bTemplateFound = true;
+				}
+			}
+		}
+
+		if (!bTemplateFound)
+		{
+			Content = FString::Printf(
+				TEXT(
+					"import * as UE from \"ue\";\n"
+					"import mixin from \"%s\";\n\n"
+					"const AssetPath = \"%s\";\n\n"
+					"@mixin(AssetPath)\n"
+					"export class %s implements %s {\n"
+					"}\n"
+				),
+				*MixinImportPath,
+				*ClassPath,
+				*MixinName,
+				*TsTypePath
+			);
+		}
+
+		FFileHelper::SaveStringToFile(Content, *AbsFilePath);
+
+		// 自动注册到 MixinRegistry.ts
+		FString RegistryFileName = Settings->MixinRegistryFileName;
+		if (RegistryFileName.IsEmpty())
+		{
+			RegistryFileName = TEXT("MixinRegistry.ts");
+		}
+
+		FString RegistryFilePath = FPaths::Combine(FPaths::ProjectDir(), TEXT("TypeScript"), RegistryFileName);
+		FPaths::MakeStandardFilename(RegistryFilePath);
+
+		FString RegistryContent;
+
+		// 如果文件不存在，创建并添加注释头
+		if (!PlatformFile.FileExists(*RegistryFilePath))
+		{
+			RegistryContent = TEXT("// Mixin Registry - 自动生成，请勿手动编辑\r\n// Auto-generated Mixin imports\r\n\r\n");
+		}
+		else
+		{
+			FFileHelper::LoadFileToString(RegistryContent, *RegistryFilePath);
+		}
+
+		FString ImportPath = TEXT("./") + RelativePath;
+		ImportPath.ReplaceInline(TEXT("\\"), TEXT("/"));
+
+		if (!RegistryContent.Contains(ImportPath))
+		{
+			FString ImportStmt = FString::Printf(TEXT("import '%s';"), *ImportPath);
+
+			// 解析文件：分离注释头和 import 语句
+			TArray<FString> Lines;
+			RegistryContent.ParseIntoArrayLines(Lines);
+
+			TArray<FString> HeaderLines;
+			TArray<FString> ImportLines;
+
+			for (const FString& Line : Lines)
+			{
+				FString TrimmedLine = Line.TrimStartAndEnd();
+				if (TrimmedLine.StartsWith(TEXT("import ")))
+				{
+					ImportLines.Add(TrimmedLine);
+				}
+				else if (TrimmedLine.StartsWith(TEXT("//")) || TrimmedLine.IsEmpty())
+				{
+					if (ImportLines.Num() == 0)
+					{
+						HeaderLines.Add(Line);
+					}
+				}
+			}
+
+			ImportLines.Add(ImportStmt);
+			ImportLines.Sort();
+
+			FString NewContent;
+			for (const FString& HeaderLine : HeaderLines)
+			{
+				NewContent += HeaderLine + TEXT("\r\n");
+			}
+			if (HeaderLines.Num() > 0 && !HeaderLines.Last().IsEmpty())
+			{
+				NewContent += TEXT("\r\n");
+			}
+			for (const FString& ImportLine : ImportLines)
+			{
+				NewContent += ImportLine + TEXT("\r\n");
+			}
+
+			FFileHelper::SaveStringToFile(NewContent, *RegistryFilePath);
+		}
+	}
+
+	// 启动编辑器
+	const FString EditorCommand = Settings->GetEditorCommand();
+	const EPuertsMixinEditorType EditorType = Settings->EditorType;
+
+	FString ProcExecutable;
+	FString ProcArgs;
+
+	if (EditorType == EPuertsMixinEditorType::VSCode)
+	{
+		const FString CmdArgs = FString::Printf(TEXT("-r -g \"%s:%d\""), *AbsFilePath, 1);
+
+		if (EditorCommand.EndsWith(TEXT(".cmd")) || EditorCommand.EndsWith(TEXT(".bat")))
+		{
+			ProcExecutable = TEXT("cmd.exe");
+			ProcArgs = FString::Printf(TEXT("/c %s %s"), *EditorCommand, *CmdArgs);
+		}
+		else
+		{
+			ProcExecutable = EditorCommand;
+			ProcArgs = CmdArgs;
+		}
+	}
+	else
+	{
+		FString CmdArgs = FString::Printf(TEXT("\"%s\""), *AbsFilePath);
+
+		if (EditorCommand.EndsWith(TEXT(".cmd")) || EditorCommand.EndsWith(TEXT(".bat")))
+		{
+			ProcExecutable = TEXT("cmd.exe");
+			ProcArgs = FString::Printf(TEXT("/c %s %s"), *EditorCommand, *CmdArgs);
+		}
+		else
+		{
+			ProcExecutable = EditorCommand;
+			ProcArgs = CmdArgs;
+		}
+	}
+
+	FProcHandle Handle = FPlatformProcess::CreateProc(
+		*ProcExecutable,
+		*ProcArgs,
+		true,
+		false,
+		false,
+		nullptr,
+		0,
+		nullptr,
+		nullptr
+	);
+
+	if (GEditor)
+	{
+		GEditor->Exec(nullptr, TEXT("Puerts.Gen"), *GLog);
+	}
+
+	if (!Handle.IsValid())
+	{
+		FMessageDialog::Open(
+			EAppMsgType::Ok, FText::Format(
+				FText::FromString(TEXT("Failed to launch editor: {0}")), FText::FromString(EditorCommand)
+			)
+		);
+	}
+}
+
+void FPuertsMixinEditorToolbar::CreateMixinsForBlueprints(const TArray<UBlueprint*>& Blueprints, const FString& TargetDirectory)
+{
+	if (Blueprints.Num() == 0)
+	{
+		return;
+	}
+
+	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+	const UPuertsMixinSettings* Settings = GetDefault<UPuertsMixinSettings>();
+	static FString BaseDir = IPluginManager::Get().FindPlugin(TEXT("PuertsMixin"))->GetBaseDir();
+
+	TArray<FString> CreatedFiles;
+
+	for (UBlueprint* TargetBP : Blueprints)
+	{
+		if (!TargetBP)
+		{
+			continue;
+		}
+
+		// Blueprint 名称
+		FString BPName = TargetBP->GetName();
+
+		// 批量导出时，MixinName 默认使用蓝图名称
+		FString MixinName = BPName;
+
+		// Blueprint 所在 Package 路径
+		FString PackageName = TargetBP->GetOutermost()->GetName();
+
+		// 去掉 /Game/ 前缀
+		FString ContentRelativePath = PackageName;
+		if (ContentRelativePath.StartsWith(TEXT("/Game/")))
+		{
+			ContentRelativePath.RightChopInline(6);
+		}
+
+		// 构造文件路径（使用 MixinName 作为文件名）
+		FString UserSelectedPath = TargetDirectory + MixinName + TEXT(".ts");
+
+		// 构造绝对路径
+		FString AbsFilePath = FPaths::Combine(FPaths::ProjectDir(), TEXT("TypeScript"), UserSelectedPath);
+		FPaths::MakeStandardFilename(AbsFilePath);
+
+		// 计算相对路径
+		FString RelativePath = UserSelectedPath;
+		if (RelativePath.EndsWith(TEXT(".ts")))
+		{
+			RelativePath.LeftChopInline(3);
+		}
+
+		// 确保目录存在
+		FString FileDir = FPaths::GetPath(AbsFilePath);
+		if (!PlatformFile.DirectoryExists(*FileDir))
+		{
+			PlatformFile.CreateDirectoryTree(*FileDir);
+		}
+
+		// 如果文件已存在则跳过
+		if (PlatformFile.FileExists(*AbsFilePath))
+		{
+			continue;
+		}
+
+		// 计算 MixinImportPath
+		TArray<FString> PathParts;
+		RelativePath.ParseIntoArray(PathParts, TEXT("/"), true);
+
+		int32 DirectoryDepth = PathParts.Num() - 1;
+
+		FString MixinImportPath;
+		if (DirectoryDepth <= 0)
+		{
+			MixinImportPath = TEXT("./mixin");
+		}
+		else
+		{
+			MixinImportPath = TEXT("..");
+			for (int32 i = 1; i < DirectoryDepth; ++i)
+			{
+				MixinImportPath += TEXT("/..");
+			}
+			MixinImportPath += TEXT("/mixin");
+		}
+
+		// Blueprint 生成类路径
+		FString ClassPath = TargetBP->GetPathName() + TEXT("_C");
+
+		// 生成 TS 类型路径
+		TArray<FString> ContentPathParts;
+		ContentRelativePath.ParseIntoArray(ContentPathParts, TEXT("/"), true);
+
+		FString TsTypePath = TEXT("UE.Game");
+		if (ContentPathParts.Num() > 0)
+		{
+			for (int32 i = 0; i < ContentPathParts.Num() - 1; ++i)
+			{
+				TsTypePath += TEXT(".");
+				TsTypePath += ContentPathParts[i];
+			}
+			const FString& BPShortName = ContentPathParts.Last();
+			TsTypePath += TEXT(".");
+			TsTypePath += BPShortName;
+			TsTypePath += TEXT(".");
+			TsTypePath += BPShortName;
+			TsTypePath += TEXT("_C");
+		}
+		else
+		{
+			TsTypePath += TEXT(".");
+			TsTypePath += BPName;
+			TsTypePath += TEXT(".");
+			TsTypePath += BPName;
+			TsTypePath += TEXT("_C");
+		}
+
+		// 查找并应用模板
+		UClass* Class = TargetBP->GeneratedClass;
+		FString Content;
+		bool bTemplateFound = false;
+
+		for (auto TemplateClass = Class; TemplateClass; TemplateClass = TemplateClass->GetSuperClass())
+		{
+			FString TemplateClassName = TemplateClass->GetName();
+			if (TemplateClassName.EndsWith(TEXT("_C")))
+			{
+				TemplateClassName.LeftChopInline(2);
+			}
+
+			FString RelativeFilePath = FPaths::Combine(
+				TEXT("Config/TSTemplates"), TemplateClassName + TEXT(".ts")
+			);
+
+			FString FullFilePath = FPaths::Combine(FPaths::ProjectConfigDir(), RelativeFilePath);
+			if (!FPaths::FileExists(FullFilePath))
+			{
+				FullFilePath = FPaths::Combine(BaseDir, RelativeFilePath);
+			}
+
+			if (FPaths::FileExists(FullFilePath))
+			{
+				if (FFileHelper::LoadFileToString(Content, *FullFilePath))
+				{
+					Content = Content.Replace(TEXT("{BPName}"), *BPName)
+									 .Replace(TEXT("{MixinName}"), *MixinName)
+									 .Replace(TEXT("{PackageName}"), *PackageName)
+									 .Replace(TEXT("{MixinImportPath}"), *MixinImportPath)
+									 .Replace(TEXT("{AssetPath}"), *ClassPath)
+									 .Replace(TEXT("{TsTypePath}"), *TsTypePath);
+
+					bTemplateFound = true;
+					break;
+				}
+			}
+		}
+
+		if (!bTemplateFound)
+		{
+			FString DefaultTemplatePath = FPaths::Combine(BaseDir, TEXT("Config/TSTemplates/Object.ts"));
+			if (FPaths::FileExists(DefaultTemplatePath))
+			{
+				if (FFileHelper::LoadFileToString(Content, *DefaultTemplatePath))
+				{
+					Content = Content.Replace(TEXT("{BPName}"), *BPName)
+									 .Replace(TEXT("{MixinName}"), *MixinName)
+									 .Replace(TEXT("{PackageName}"), *PackageName)
+									 .Replace(TEXT("{MixinImportPath}"), *MixinImportPath)
+									 .Replace(TEXT("{AssetPath}"), *ClassPath)
+									 .Replace(TEXT("{TsTypePath}"), *TsTypePath);
+					bTemplateFound = true;
+				}
+			}
+		}
+
+		if (!bTemplateFound)
+		{
+			Content = FString::Printf(
+				TEXT(
+					"import * as UE from \"ue\";\n"
+					"import mixin from \"%s\";\n\n"
+					"const AssetPath = \"%s\";\n\n"
+					"@mixin(AssetPath)\n"
+					"export class %s implements %s {\n"
+					"}\n"
+				),
+				*MixinImportPath,
+				*ClassPath,
+				*MixinName,
+				*TsTypePath
+			);
+		}
+
+		FFileHelper::SaveStringToFile(Content, *AbsFilePath);
+		CreatedFiles.Add(RelativePath);
+
+		// 自动注册到 MixinRegistry.ts
+		FString RegistryFileName = Settings->MixinRegistryFileName;
+		if (RegistryFileName.IsEmpty())
+		{
+			RegistryFileName = TEXT("MixinRegistry.ts");
+		}
+
+		FString RegistryFilePath = FPaths::Combine(FPaths::ProjectDir(), TEXT("TypeScript"), RegistryFileName);
+		FPaths::MakeStandardFilename(RegistryFilePath);
+
+		FString RegistryContent;
+
+		// 如果文件不存在，创建并添加注释头
+		if (!PlatformFile.FileExists(*RegistryFilePath))
+		{
+			RegistryContent = TEXT("// Mixin Registry - 自动生成，请勿手动编辑\r\n// Auto-generated Mixin imports\r\n\r\n");
+		}
+		else
+		{
+			FFileHelper::LoadFileToString(RegistryContent, *RegistryFilePath);
+		}
+
+		FString ImportPath = TEXT("./") + RelativePath;
+		ImportPath.ReplaceInline(TEXT("\\"), TEXT("/"));
+
+		if (!RegistryContent.Contains(ImportPath))
+		{
+			FString ImportStmt = FString::Printf(TEXT("import '%s';"), *ImportPath);
+
+			// 解析文件：分离注释头和 import 语句
+			TArray<FString> Lines;
+			RegistryContent.ParseIntoArrayLines(Lines);
+
+			TArray<FString> HeaderLines;
+			TArray<FString> ImportLines;
+
+			for (const FString& Line : Lines)
+			{
+				FString TrimmedLine = Line.TrimStartAndEnd();
+				if (TrimmedLine.StartsWith(TEXT("import ")))
+				{
+					ImportLines.Add(TrimmedLine);
+				}
+				else if (TrimmedLine.StartsWith(TEXT("//")) || TrimmedLine.IsEmpty())
+				{
+					if (ImportLines.Num() == 0)
+					{
+						HeaderLines.Add(Line);
+					}
+				}
+			}
+
+			ImportLines.Add(ImportStmt);
+			ImportLines.Sort();
+
+			FString NewContent;
+			for (const FString& HeaderLine : HeaderLines)
+			{
+				NewContent += HeaderLine + TEXT("\r\n");
+			}
+			if (HeaderLines.Num() > 0 && !HeaderLines.Last().IsEmpty())
+			{
+				NewContent += TEXT("\r\n");
+			}
+			for (const FString& ImportLine : ImportLines)
+			{
+				NewContent += ImportLine + TEXT("\r\n");
+			}
+
+			FFileHelper::SaveStringToFile(NewContent, *RegistryFilePath);
+		}
+	}
+
+	// 执行 Puerts.Gen
+	if (GEditor && CreatedFiles.Num() > 0)
+	{
+		GEditor->Exec(nullptr, TEXT("Puerts.Gen"), *GLog);
+	}
+
+	// 显示结果
+	if (CreatedFiles.Num() > 0)
+	{
+		FString Message = FString::Printf(TEXT("Created %d Mixin file(s):\n"), CreatedFiles.Num());
+		for (const FString& File : CreatedFiles)
+		{
+			Message += TEXT("  - ") + File + TEXT(".ts\n");
+		}
+		FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(Message));
+	}
+	else
+	{
+		FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(TEXT("No new Mixin files created (files may already exist).")));
 	}
 }
 
