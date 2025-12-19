@@ -10,7 +10,8 @@
 			"PuertsMixinSettings.cpp.obj",
 			"PuertsMixinStyle.cpp.obj",
 			"BlueprintToolbar.cpp.obj",
-			"PuertsMixinEditorToolbar.cpp.obj"
+			"PuertsMixinEditorToolbar.cpp.obj",
+			"SMixinPathDialog.cpp.obj"
 		]
 	}
 }

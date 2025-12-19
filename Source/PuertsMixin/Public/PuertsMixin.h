@@ -5,8 +5,11 @@
 #pragma once
 
 #include "Modules/ModuleManager.h"
+#include "ContentBrowserDelegates.h"
 
 class FBlueprintToolbar;
+class FMenuBuilder;
+struct FAssetData;
 
 class FPuertsMixinModule : public IModuleInterface
 {
@@ -29,6 +32,21 @@ private:
 	/** 引擎初始化后回调 */
 	void OnPostEngineInit();
 
+	/** ContentBrowser 右键菜单扩展回调 */
+	TSharedRef<FExtender> OnExtendContentBrowserAssetMenu(const TArray<FAssetData>& SelectedAssets);
+
+	/** 添加 Mixin 菜单项 */
+	void AddMixinMenuEntry(FMenuBuilder& MenuBuilder, TArray<FAssetData> SelectedAssets);
+
+	/** 从单个资产创建 Mixin */
+	void OnCreateMixinFromAsset(FAssetData AssetData);
+
+	/** 从多个资产批量创建 Mixin */
+	void OnCreateMixinFromAssets(TArray<FAssetData> SelectedAssets);
+
 	/** 蓝图工具栏实例 */
 	TSharedPtr<FBlueprintToolbar> BlueprintToolbar;
+
+	/** ContentBrowser 扩展委托句柄 */
+	FDelegateHandle ContentBrowserExtenderHandle;
 };

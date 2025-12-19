@@ -1,21 +1,11 @@
-import * as UE from "ue";
-import mixin from "{MixinImportPath}";
+import * as UE from 'ue';
+import mixin, { iMixinedClass } from '{MixinImportPath}';
 
-// 蓝图类路径（Puerts绑定路径）
-const AssetPath = "{AssetPath}";
+const AssetPath = '{AssetPath}';
 
-// 创建一个继承 TS 类（或其他类）的接口（用于类型提示）
-export interface {BPName}
+export interface {MixinName} extends {TsTypePath} {}
 
-extends
-{TsTypePath}
-{}
-
-// 创建一个继承 TS 的本体类，并通过 mixin 将蓝图逻辑混入
-@mixin(AssetPath)
-export class {BPName}
-
-implements
-{TsTypePath}
-{
+/** {BPName} Mixin */
+@mixin(AssetPath, true, true)
+export class {MixinName} extends iMixinedClass implements {MixinName} {
 }
